@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -31,6 +32,7 @@ typedef struct {
     int markers[3];
     uint32_t read_bytes;
     uint32_t first_bad;
+    uint8_t *resident;
 } rom_result_t;
 
 static inline uint32_t reg32(uint32_t address)
@@ -87,6 +89,7 @@ static int check_rom(rom_result_t *r)
     }
 
     r->first_bad = 0xffffffffu;
+    r->resident = malloc(ROM_SIZE);
     while(r->read_bytes < ROM_SIZE) {
         unsigned int count = ROM_SIZE - r->read_bytes;
         if(count > sizeof(read_buffer)) count = sizeof(read_buffer);
@@ -105,12 +108,18 @@ static int check_rom(rom_result_t *r)
             if(offset == ROM_MID) r->markers[1] = (read_buffer[i] == 0xa5);
             if(offset == ROM_LAST) r->markers[2] = (read_buffer[i] == 0x3c);
         }
+        if(r->resident)
+            memcpy(r->resident + r->read_bytes, read_buffer, (size_t)n);
         r->read_bytes += (uint32_t)n;
     }
 
     r->complete = (r->read_bytes == ROM_SIZE &&
                    r->first_bad == 0xffffffffu);
     close(fd);
+    if(!r->complete) {
+        free(r->resident);
+        r->resident = NULL;
+    }
     return 0;
 }
 
@@ -130,6 +139,108 @@ static int write_report(char const *text)
         remaining -= (size_t)n;
     }
     return close(fd) == 0 ? 0 : -3;
+}
+
+/* Shared results.txt format: all targets use these exact section/field
+   names, uppercase 8-digit hexadecimal values and lowercase match states. */
+static char report[2100];
+static size_t report_used;
+
+static void append_line(char const *label, char const *value)
+{
+    int n = snprintf(report + report_used, sizeof(report) - report_used,
+        "%s%s\n", label, value);
+    if(n>0 && (size_t)n<sizeof(report)-report_used)report_used+=(size_t)n;
+}
+static void append_hex(char const *name, uint32_t value, int available)
+{
+    char temp[18];
+    if(available) snprintf(temp,sizeof(temp),"%08X",value);
+    else snprintf(temp,sizeof(temp),"N/A");
+    append_line(name,temp);
+}
+static void append_sample(char const *title, uint8_t const *ptr, int at)
+{
+    uint32_t pa=0xffffffffu,pg=0;
+    int ok=ptr && translate_any((uint32_t)ptr,at,&pa,&pg);
+    char temp[32];
+    append_line("\n",title);
+    append_hex("VA ",(uint32_t)ptr,ptr!=NULL);
+    append_hex("PA ",pa,ok);
+    append_hex("P1 ",pa|0x80000000u,ok);
+    append_hex("PAGE bytes ",pg,ok && pg!=0);
+    append_hex("VA value ",ptr ? (uint32_t)*ptr : 0,ptr!=NULL);
+    append_hex("P1 value ",ok ?
+        (uint32_t)*(volatile uint8_t const *)(pa|0x80000000u) : 0,ok);
+    if(!ok)append_line("Alias match: ","N/A");
+    else {
+        uint8_t alias=*(volatile uint8_t const *)(pa|0x80000000u);
+        append_line("Alias match: ",*ptr==alias?"yes":"no");
+    }
+    (void)temp;
+}
+static void build_report(uint32_t pvr,uint32_t prr,uint32_t cvr,
+    uint32_t cpidr,uint32_t frqcr,uint32_t pllcr,uint32_t fllfrq,
+    uint32_t ram_pa,uint32_t ram_pg,uint32_t ram_size,int ram_ok,
+    uint32_t code_va,uint32_t code_pa,uint32_t code_pg,int code_ok,
+    uint16_t code_word,rom_result_t const *rom,int at)
+{
+    uint32_t p1=code_pa|0x80000000u;
+    int sample_ok=0,sample_contiguous=0;
+    uint32_t p0=0,p_mid=0,p_end=0,g=0;
+    report_used=0;
+    report[0]=0;
+    append_line("SH7305 PROBE RESULTS\n====================\n","");
+    append_hex("\nPVR   ",pvr,1);
+    append_hex("PRR   ",prr,1);
+    append_hex("CVR   ",cvr,1);
+    append_hex("CPIDR ",cpidr,1);
+
+    append_line("\nUSER RAM","");
+    append_hex("VA ",0x08100000u,1);
+    append_hex("PA ",ram_pa,ram_ok);
+    append_hex("P1 ",ram_pa|0x80000000u,ram_ok);
+    append_hex("PAGE bytes ",ram_pg,ram_ok && ram_pg!=0);
+    append_hex("RAM span bytes ",ram_size,ram_ok && ram_size!=0);
+
+    append_line("\nSH7305 CLOCKS (raw)","");
+    append_hex("FRQCR  ",frqcr,1);
+    append_hex("PLLCR  ",pllcr,1);
+    append_hex("PLLFRQ ",fllfrq,1);
+    append_line("Frequency Hz: ","N/A");
+
+    append_line("\nADDIN CODE","");
+    append_hex("VA ",code_va,1);
+    append_hex("PA ",code_pa,code_ok);
+    append_hex("P1 ",p1,code_ok);
+    append_hex("PAGE bytes ",code_pg,code_ok && code_pg!=0);
+    append_hex("VA value ",code_word,1);
+    append_hex("P1 value ",code_ok ?
+        *(volatile uint16_t const *)p1 : 0,code_ok);
+    append_line("Alias match: ",!code_ok?"N/A":
+        code_word==*(volatile uint16_t const *)p1?"yes":"no");
+
+    append_sample("ROM 1.5M START",rom->resident,at);
+    append_sample("ROM 1.5M MID",rom->resident?
+        rom->resident+ROM_MID:NULL,at);
+    append_sample("ROM 1.5M END",rom->resident?
+        rom->resident+ROM_LAST:NULL,at);
+    if(rom->resident &&
+       translate_any((uint32_t)rom->resident,at,&p0,&g) &&
+       translate_any((uint32_t)(rom->resident+ROM_MID),at,&p_mid,&g) &&
+       translate_any((uint32_t)(rom->resident+ROM_LAST),at,&p_end,&g)) {
+        sample_ok=1;
+        sample_contiguous=p_mid-p0==ROM_MID && p_end-p0==ROM_LAST;
+    }
+    append_line("\nLINUX ROM TEST","");
+    append_hex("ROM bytes ",ROM_SIZE,1);
+    append_line("Sample map: ",sample_ok?"YES":"N/A");
+    append_line("Samples contiguous: ",sample_ok?
+        (sample_contiguous?"YES":"NO"):"N/A");
+    append_line("File integrity: ",rom->complete?"PASS":"FAIL");
+    append_hex("File first bad: ",rom->first_bad,1);
+    append_hex("File read bytes: ",rom->read_bytes,1);
+    append_line("Note: ","samples are RAM backing; the file is not mapped ROM.");
 }
 
 static void title(char const *name)
@@ -168,48 +279,11 @@ int main(void)
     rom_result_t rom = {.first_bad = 0xffffffffu};
     check_rom(&rom);
 
-    /* Always emit all measured values, including failed/missing payloads.
-       Overwrite the previous report to keep one easy-to-find log. */
-    char report[1536];
-    int length = snprintf(report, sizeof(report),
-        "SH7305 PROBE RESULTS\\n"
-        "====================\\n"
-        "CPU\\n"
-        "PVR: %08X\\nPRR: %08X\\nCVR: %08X\\nCPID: %08X\\n"
-        "\\nUSER RAM / MMU\\n"
-        "MMUCR: %08X\\nAT: %s\\n"
-        "RAM VA: 08100000\\nRAM PA: %08X\\nRAM P1: %08X\\n"
-        "RAM SIZE: %u\\nRAM PAGE: %u\\nRAM MAP: %s\\n"
-        "\\nCLOCKS\\n"
-        "FRQCR: %08X\\nPLLCR: %08X\\nFLLFRQ: %08X\\n"
-        "Iphi: %u\\nBphi: %u\\nPphi: %u\\n"
-        "\\nCODE MAP\\n"
-        "VA: %08X\\nPA: %08X\\nP1: %08X\\nPAGE: %u\\n"
-        "MAPPED: %s\\nVA WORD: %08X\\nP1 WORD: %08X\\nMATCH: %s\\n"
-        "\\nEXTERNAL ROM PROBE\\n"
-        "PATH: /romprobe.bin\\nSIZE EXPECTED: %u\\n"
-        "OPEN: %s\\nSIZE OK: %s\\nBYTES READ: %u\\n"
-        "START 0x000000 (5A): %s\\n"
-        "MID   0x080000 (A5): %s\\n"
-        "END   0x17FFFF (3C): %s\\n"
-        "FIRST BAD OFFSET: %08X\\nDATA: %s\\n"
-        "NOTE: file integrity does not establish physical ROM contiguity.\\n",
-        pvr, prr, cvr, cpidr,
-        mmucr, at_enabled ? "ON" : "OFF",
-        ram_pa, ram_p1, ram_size, ram_pg, ram_ok ? "YES" : "NO",
-        frqcr, pllcr, fllfrq, f->Iphi_f, f->Bphi_f, f->Pphi_f,
-        code_va, code_pa, code_p1, code_pg,
-        code_ok ? "YES" : "NO", va_word, p1_word,
-        code_ok && va_word == p1_word ? "YES" : "NO",
-        ROM_SIZE, rom.opened ? "YES" : "NO",
-        rom.size_ok ? "YES" : "NO", rom.read_bytes,
-        rom.markers[0] ? "YES" : "NO",
-        rom.markers[1] ? "YES" : "NO",
-        rom.markers[2] ? "YES" : "NO",
-        rom.first_bad, rom.complete ? "PASS" : "FAIL");
-    int save_status = -4;
-    if(length >= 0 && (size_t)length < sizeof(report))
-        save_status = write_report(report);
+    build_report(pvr,prr,cvr,cpidr,frqcr,pllcr,fllfrq,
+        ram_pa,ram_pg,ram_size,ram_ok,
+        code_va,code_pa,code_pg,code_ok,(uint16_t)va_word,&rom,at_enabled);
+    int save_status = write_report(report);
+    free(rom.resident);
 
     title("SH7305 CPU");
     dprint(1, 13, C_BLACK, "PVR %08X", pvr);
