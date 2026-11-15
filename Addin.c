@@ -166,7 +166,7 @@ int main(void)
     uint32_t p1_word = code_ok
         ? *(volatile uint32_t const *)code_p1 : 0;
 
-    rom_result_t rom = {0};
+    rom_result_t rom = {.first_bad = 0xffffffffu};
     gint_world_switch(GINT_CALL(check_rom, &rom));
 
     /* Always emit all measured values, including failed/missing payloads.
@@ -282,7 +282,7 @@ int main(void)
 
     title("RESULTS FILE");
     dtext(1, 13, C_BLACK, "/results.txt");
-    dtext(1, 25, C_BLACK, "OS: \\fls0\\results.txt");
+    dtext(1, 25, C_BLACK, "Storage root (fls0)");
     dprint(1, 43, C_BLACK, "SAVE %s (%d)",
         save_status == 0 ? "OK" : "FAILED", save_status);
     next_page();
