@@ -41,13 +41,22 @@ full-file integrity without linking 1.5 MiB into the HH3 image.
 
 ## Interpretation
 
-This is a **file integrity test**, not a physical ROM mapping test.
-On ClassPad/Hollyhock-3 gint executes in directly addressed RAM without
-an active MMU translation. The external file is held in storage, not in
-the add-in's `.rodata` segment. Its physical mapping or contiguous ROM
-residency therefore **cannot be inferred** from these results.
+The SH7305 **does** support MMU translation: see
+[NTOS_SH4/src/mmu.hpp](https://github.com/TheRainbowPhoenix/NTOS_SH4/blob/main/src/mmu.hpp)
+and [tlb_helper.S](https://github.com/TheRainbowPhoenix/NTOS_SH4/blob/main/src/tlb_helper.S).
+The diagnostic reads the live MMUCR. When address translation (AT) is on,
+it queries gint's UTLB translation for P0 addresses; P1/P2 use their
+direct physical aliases. No UTLB entries are changed by this add-in.
 
-The CPU and CPG pages show hardware register values. The code map shows
-the direct P1 alias and checks its first instruction word if the code is
-located in P1/P2. The original user-RAM and UTLB probes are displayed as
-not applicable to fxCP.
+The external file check is **file integrity**, not a physical ROM mapping
+test: the file is held in storage, not the add-in's `.rodata` segment.
+Its physical mapping or contiguous ROM residency cannot be inferred from
+the streaming result. To test 1.5 MiB of UTLB-backed mapped memory would
+require an additional, explicitly mapped resident backing buffer or a
+file-backed pager such as the experimental NTOS loader uses.
+
+## CI
+
+GitHub Actions uses `ghcr.io/therainbowphoenix/gint-docker:main` to build
+with `fxsdk build-cp`, verify the external payload and HH3 size, and
+upload both files together as `SH7305Probe-fxCP`.
