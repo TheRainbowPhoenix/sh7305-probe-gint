@@ -6,7 +6,6 @@
 #include <gint/clock.h>
 #include <gint/mpu/cpg.h>
 #include <gint/mmu.h>
-#include <gint/gint.h>
 
 #include <fcntl.h>
 #include <stdint.h>
@@ -115,7 +114,7 @@ static int check_rom(rom_result_t *r)
     return 0;
 }
 
-/* Called through gint_world_switch: OS filesystem access needs OS context. */
+/* gint's fxCP Fugue filesystem calls work directly in the add-in world. */
 static int write_report(char const *text)
 {
     int fd = open(RESULTS_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -167,7 +166,7 @@ int main(void)
         ? *(volatile uint32_t const *)code_p1 : 0;
 
     rom_result_t rom = {.first_bad = 0xffffffffu};
-    gint_world_switch(GINT_CALL(check_rom, &rom));
+    check_rom(&rom);
 
     /* Always emit all measured values, including failed/missing payloads.
        Overwrite the previous report to keep one easy-to-find log. */
@@ -210,7 +209,7 @@ int main(void)
         rom.first_bad, rom.complete ? "PASS" : "FAIL");
     int save_status = -4;
     if(length >= 0 && (size_t)length < sizeof(report))
-        save_status = gint_world_switch(GINT_CALL(write_report, report));
+        save_status = write_report(report);
 
     title("SH7305 CPU");
     dprint(1, 13, C_BLACK, "PVR %08X", pvr);
