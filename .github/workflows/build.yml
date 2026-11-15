@@ -1,0 +1,44 @@
+name: Build (fx-cp)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/therainbowphoenix/gint-docker:main
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build (fxsdk build-cp)
+        run: fxsdk build-cp
+
+      - name: Verify separate payload and image size
+        run: |
+          test -f SH7305Probe.hh3
+          test -f build-cp/romprobe.bin
+          test "$(stat -c %s build-cp/romprobe.bin)" -eq 1572864
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build-cp/romprobe.bin")
+          with p.open("rb") as f:
+              for offset, expected in ((0, 0x5a), (0x80000, 0xa5), (0x17ffff, 0x3c)):
+                  f.seek(offset)
+                  assert f.read(1) == bytes([expected]), hex(offset)
+          assert Path("SH7305Probe.hh3").stat().st_size < 0x180000, "ROM blob leaked into HH3"
+          PY
+
+      - name: Upload calculator files
+        uses: actions/upload-artifact@v4
+        with:
+          name: SH7305Probe-fxCP
+          path: |
+            SH7305Probe.hh3
+            build-cp/romprobe.bin
+          if-no-files-found: error
+          retention-days: 14
