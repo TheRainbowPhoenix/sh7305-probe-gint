@@ -5,6 +5,7 @@
 #include <gint/keyboard.h>
 #include <gint/clock.h>
 #include <gint/mpu/cpg.h>
+#include <gint/mmu.h>
 
 #include <fcntl.h>
 #include <stdint.h>
@@ -15,8 +16,9 @@
 #define ROM_LAST (ROM_SIZE - 1u)
 #define ROM_PATH "/romprobe.bin"
 
-/* fxCP/HH3 runs from physical RAM (P1), without an active UTLB.
-   The 1.5 MiB test data must not be linked into this executable. */
+/* The payload is an external file, never linked into the HH3 image.
+   NTOS_SH4 shows that SH7305 can enable and program the UTLB; inspect
+   live MMUCR. Do not install mappings or mutate OS/gint MMU state. */
 static uint8_t read_buffer[4096];
 
 typedef struct {
@@ -31,6 +33,35 @@ typedef struct {
 static inline uint32_t reg32(uint32_t address)
 {
     return *(volatile uint32_t const *)address;
+}
+
+/* MMUCR.AT is bit 0 (see NTOS_SH4/src/mmu.hpp).
+   P1/P2 are unmapped aliases regardless of AT. For P0 use gint's
+   UTLB lookup only while translation is enabled. */
+static int translate_any(uint32_t va, int at_enabled,
+    uint32_t *pa, uint32_t *page_size)
+{
+    if(va >= 0x80000000u && va < 0xc0000000u) {
+        *pa = va & 0x1fffffffu;
+        *page_size = 0;
+        return 1;
+    }
+    *pa = 0xffffffffu;
+    *page_size = 0;
+    if(!at_enabled || va >= 0x80000000u) return 0;
+
+    static const uint32_t sizes[] = {1024, 4096, 65536, 1048576};
+    for(unsigned int i = 0; i < sizeof(sizes)/sizeof(sizes[0]); i++) {
+        uint32_t base = va & ~(sizes[i] - 1u);
+        uint32_t pg = 0;
+        uint32_t pbase = mmu_translate(base, &pg);
+        if(pbase == 0xffffffffu || pg == 0 || (va - base) >= pg)
+            continue;
+        *pa = pbase + va - base;
+        *page_size = pg;
+        return 1;
+    }
+    return 0;
 }
 
 static void next_page(void)
@@ -97,12 +128,19 @@ int main(void)
     uint32_t fllfrq = SH7305_CPG.FLLFRQ.lword;
     clock_frequency_t const *f = clock_freq();
 
+    uint32_t mmucr = reg32(0xff000010);
+    int at_enabled = (mmucr & 1u) != 0;
+    uint32_t ram_pa = 0xffffffffu, ram_pg = 0;
+    int ram_ok = translate_any(0x08100000u, at_enabled, &ram_pa, &ram_pg);
+    uint32_t ram_size = mmu_uram_size();
+    uint32_t ram_p1 = (uint32_t)mmu_uram();
+
     uint32_t code_va = (uint32_t)&main;
-    int direct = (code_va >= 0x80000000u && code_va < 0xc0000000u);
-    uint32_t code_pa = direct ? (code_va & 0x1fffffffu) : 0xffffffffu;
-    uint32_t code_p1 = direct ? (code_pa | 0x80000000u) : 0xffffffffu;
+    uint32_t code_pa = 0xffffffffu, code_pg = 0;
+    int code_ok = translate_any(code_va, at_enabled, &code_pa, &code_pg);
+    uint32_t code_p1 = code_ok ? (code_pa | 0x80000000u) : 0xffffffffu;
     uint32_t va_word = *(volatile uint32_t const *)code_va;
-    uint32_t p1_word = direct
+    uint32_t p1_word = code_ok
         ? *(volatile uint32_t const *)code_p1 : 0;
 
     rom_result_t rom = {0};
@@ -116,10 +154,13 @@ int main(void)
     next_page();
 
     title("USER RAM / MMU");
-    dtext(1, 13, C_BLACK, "HH3: direct RAM");
-    dtext(1, 23, C_BLACK, "No active UTLB mapping");
-    dtext(1, 33, C_BLACK, "0x08100000: N/A");
-    dtext(1, 43, C_BLACK, "MMU pages: N/A");
+    dprint(1, 13, C_BLACK, "MMUCR %08X", mmucr);
+    dprint(1, 23, C_BLACK, "AT %s PA %08X",
+        at_enabled ? "ON" : "OFF", ram_pa);
+    dprint(1, 33, C_BLACK, "P1 %08X", ram_p1);
+    dprint(1, 43, C_BLACK, "SIZE %u", ram_size);
+    dprint(1, 53, C_BLACK, "PG %u %s", ram_pg,
+        ram_ok ? "OK" : "NONE");
     next_page();
 
     title("SH7305 CLOCKS");
@@ -130,18 +171,18 @@ int main(void)
     dprint(1, 53, C_BLACK, "B%u P%u", f->Bphi_f, f->Pphi_f);
     next_page();
 
-    title("CODE MAP (DIRECT)");
+    title("CODE MAP");
     dprint(1, 13, C_BLACK, "VA %08X", code_va);
     dprint(1, 25, C_BLACK, "PA %08X", code_pa);
     dprint(1, 37, C_BLACK, "P1 %08X", code_p1);
-    dtext(1, 49, C_BLACK, "UTLB PG N/A");
+    dprint(1, 49, C_BLACK, "PG %u", code_pg);
     next_page();
 
     title("P1 CODE TEST");
     dprint(1, 15, C_BLACK, "VA %08X", va_word);
     dprint(1, 29, C_BLACK, "P1 %08X", p1_word);
     dprint(1, 45, C_BLACK, "MATCH %s",
-        direct && va_word == p1_word ? "YES" : "NO");
+        code_ok && va_word == p1_word ? "YES" : "NO");
     next_page();
 
     title("ROM 1.5M START");
