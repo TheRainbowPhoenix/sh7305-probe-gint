@@ -32,7 +32,7 @@ storage root: \`\\fls0\\results.txt\` (gint path \`/results.txt\`). It overwrite
 the previous run and records CPU, clock, MMU, code mapping, and full ROM
 file-verification results even when the ROM check fails. The final screen
 shows \`SAVE OK\` or \`SAVE FAILED\` with an error code. File operations
-use \`gint_world_switch()\` to access the OS filesystem.
+use gint's native fxCP Fugue filesystem directly (no world switch).
 
 ## Data layout
 
