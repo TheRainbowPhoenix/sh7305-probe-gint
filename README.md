@@ -1,6 +1,6 @@
 # SH7305 probe (gint / Hollyhock-3)
 
-A nine-page diagnostic for the Casio ClassPad II (fxCP), built with gint
+A ten-page diagnostic for the Casio ClassPad II (fxCP), built with gint
 and loaded by the Hollyhock-3/YAL launcher.
 
 ## Build
@@ -17,13 +17,22 @@ The build generates **two separate files** under `build-cp/`:
 - `romprobe.bin` — the 1,572,864-byte (0x180000) external payload.
 
 Copy both files to the calculator's storage root and launch the HH3
-with Hollyhock-3/YAL. Press a key to advance through the nine pages.
+with Hollyhock-3/YAL. Press a key to advance through the ten pages.
 
 To regenerate the binary independently:
 
 ```sh
 python3 tools/make_romprobe.py romprobe.bin
 ```
+
+## Saved results
+
+On each launch the add-in writes a plain-text report to the calculator's
+storage root: \`\\fls0\\results.txt\` (gint path \`/results.txt\`). It overwrites
+the previous run and records CPU, clock, MMU, code mapping, and full ROM
+file-verification results even when the ROM check fails. The final screen
+shows \`SAVE OK\` or \`SAVE FAILED\` with an error code. File operations
+use \`gint_world_switch()\` to access the OS filesystem.
 
 ## Data layout
 
