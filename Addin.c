@@ -273,6 +273,7 @@ int main(void)
     int code_ok = translate_any(code_va, at_enabled, &code_pa, &code_pg);
     uint32_t code_p1 = code_ok ? (code_pa | 0x80000000u) : 0xffffffffu;
     uint32_t va_word = *(volatile uint32_t const *)code_va;
+    uint16_t code_halfword = *(volatile uint16_t const *)code_va;
     uint32_t p1_word = code_ok
         ? *(volatile uint32_t const *)code_p1 : 0;
 
@@ -281,7 +282,7 @@ int main(void)
 
     build_report(pvr,prr,cvr,cpidr,frqcr,pllcr,fllfrq,
         ram_pa,ram_pg,ram_size,ram_ok,
-        code_va,code_pa,code_pg,code_ok,(uint16_t)va_word,&rom,at_enabled);
+        code_va,code_pa,code_pg,code_ok,code_halfword,&rom,at_enabled);
     int save_status = write_report(report);
     free(rom.resident);
 
