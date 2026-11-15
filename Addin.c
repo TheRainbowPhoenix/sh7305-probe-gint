@@ -6,15 +6,19 @@
 #include <gint/clock.h>
 #include <gint/mpu/cpg.h>
 #include <gint/mmu.h>
+#include <gint/gint.h>
 
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 
 #define ROM_SIZE 0x180000u
 #define ROM_MID  0x080000u
 #define ROM_LAST (ROM_SIZE - 1u)
 #define ROM_PATH "/romprobe.bin"
+#define RESULTS_PATH "/results.txt" /* OS: \\fls0\\results.txt */
 
 /* The payload is an external file, never linked into the HH3 image.
    NTOS_SH4 shows that SH7305 can enable and program the UTLB; inspect
@@ -70,17 +74,17 @@ static void next_page(void)
     getkey();
 }
 
-static void check_rom(rom_result_t *r)
+static int check_rom(rom_result_t *r)
 {
     int fd = open(ROM_PATH, O_RDONLY);
-    if(fd < 0) return;
+    if(fd < 0) return -1;
     r->opened = 1;
 
     off_t length = lseek(fd, 0, SEEK_END);
     r->size_ok = (length == (off_t)ROM_SIZE);
     if(!r->size_ok || lseek(fd, 0, SEEK_SET) != 0) {
         close(fd);
-        return;
+        return -1;
     }
 
     r->first_bad = 0xffffffffu;
@@ -108,6 +112,25 @@ static void check_rom(rom_result_t *r)
     r->complete = (r->read_bytes == ROM_SIZE &&
                    r->first_bad == 0xffffffffu);
     close(fd);
+    return 0;
+}
+
+/* Called through gint_world_switch: OS filesystem access needs OS context. */
+static int write_report(char const *text)
+{
+    int fd = open(RESULTS_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if(fd < 0) return -1;
+    size_t remaining = strlen(text);
+    while(remaining) {
+        ssize_t n = write(fd, text, remaining);
+        if(n <= 0) {
+            close(fd);
+            return -2;
+        }
+        text += n;
+        remaining -= (size_t)n;
+    }
+    return close(fd) == 0 ? 0 : -3;
 }
 
 static void title(char const *name)
@@ -144,7 +167,50 @@ int main(void)
         ? *(volatile uint32_t const *)code_p1 : 0;
 
     rom_result_t rom = {0};
-    check_rom(&rom);
+    gint_world_switch(GINT_CALL(check_rom, &rom));
+
+    /* Always emit all measured values, including failed/missing payloads.
+       Overwrite the previous report to keep one easy-to-find log. */
+    char report[1536];
+    int length = snprintf(report, sizeof(report),
+        "SH7305 PROBE RESULTS\\n"
+        "====================\\n"
+        "CPU\\n"
+        "PVR: %08X\\nPRR: %08X\\nCVR: %08X\\nCPID: %08X\\n"
+        "\\nUSER RAM / MMU\\n"
+        "MMUCR: %08X\\nAT: %s\\n"
+        "RAM VA: 08100000\\nRAM PA: %08X\\nRAM P1: %08X\\n"
+        "RAM SIZE: %u\\nRAM PAGE: %u\\nRAM MAP: %s\\n"
+        "\\nCLOCKS\\n"
+        "FRQCR: %08X\\nPLLCR: %08X\\nFLLFRQ: %08X\\n"
+        "Iphi: %u\\nBphi: %u\\nPphi: %u\\n"
+        "\\nCODE MAP\\n"
+        "VA: %08X\\nPA: %08X\\nP1: %08X\\nPAGE: %u\\n"
+        "MAPPED: %s\\nVA WORD: %08X\\nP1 WORD: %08X\\nMATCH: %s\\n"
+        "\\nEXTERNAL ROM PROBE\\n"
+        "PATH: /romprobe.bin\\nSIZE EXPECTED: %u\\n"
+        "OPEN: %s\\nSIZE OK: %s\\nBYTES READ: %u\\n"
+        "START 0x000000 (5A): %s\\n"
+        "MID   0x080000 (A5): %s\\n"
+        "END   0x17FFFF (3C): %s\\n"
+        "FIRST BAD OFFSET: %08X\\nDATA: %s\\n"
+        "NOTE: file integrity does not establish physical ROM contiguity.\\n",
+        pvr, prr, cvr, cpidr,
+        mmucr, at_enabled ? "ON" : "OFF",
+        ram_pa, ram_p1, ram_size, ram_pg, ram_ok ? "YES" : "NO",
+        frqcr, pllcr, fllfrq, f->Iphi_f, f->Bphi_f, f->Pphi_f,
+        code_va, code_pa, code_p1, code_pg,
+        code_ok ? "YES" : "NO", va_word, p1_word,
+        code_ok && va_word == p1_word ? "YES" : "NO",
+        ROM_SIZE, rom.opened ? "YES" : "NO",
+        rom.size_ok ? "YES" : "NO", rom.read_bytes,
+        rom.markers[0] ? "YES" : "NO",
+        rom.markers[1] ? "YES" : "NO",
+        rom.markers[2] ? "YES" : "NO",
+        rom.first_bad, rom.complete ? "PASS" : "FAIL");
+    int save_status = -4;
+    if(length >= 0 && (size_t)length < sizeof(report))
+        save_status = gint_world_switch(GINT_CALL(write_report, report));
 
     title("SH7305 CPU");
     dprint(1, 13, C_BLACK, "PVR %08X", pvr);
@@ -212,6 +278,13 @@ int main(void)
     dprint(1, 33, C_BLACK, "LEN %s", rom.size_ok ? "OK" : "BAD");
     dprint(1, 43, C_BLACK, "READ %u", rom.read_bytes);
     dprint(1, 53, C_BLACK, "DATA %s", rom.complete ? "PASS" : "FAIL");
+    next_page();
+
+    title("RESULTS FILE");
+    dtext(1, 13, C_BLACK, "/results.txt");
+    dtext(1, 25, C_BLACK, "OS: \\fls0\\results.txt");
+    dprint(1, 43, C_BLACK, "SAVE %s (%d)",
+        save_status == 0 ? "OK" : "FAILED", save_status);
     next_page();
 
     return 1;
